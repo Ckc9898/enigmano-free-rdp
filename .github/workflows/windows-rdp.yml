@@ -1,0 +1,192 @@
+
+name: EnigMano Instance Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_number:
+        description: 'Instance Number (1-10)'
+        required: true
+        default: '1'
+        type: string
+
+jobs:
+  deploy-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: System Information
+      run: |
+        Write-Host "=== ENIGMANO RDP DEPLOYMENT ===" -ForegroundColor Green
+        Write-Host "Instance Number: ${{ github.event.inputs.instance_number }}" -ForegroundColor Yellow
+        Write-Host "Runner: $env:RUNNER_NAME" -ForegroundColor Yellow
+        Write-Host "Workflow: $env:GITHUB_WORKFLOW" -ForegroundColor Yellow
+        
+        # System specs
+        Write-Host "`n=== SYSTEM SPECIFICATIONS ===" -ForegroundColor Cyan
+        Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion, TotalPhysicalMemory
+        Get-WmiObject -Class Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors
+        
+    - name: Enable RDP
+      run: |
+        Write-Host "Enabling Remote Desktop..." -ForegroundColor Green
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 1
+        
+    - name: Create User Account
+      run: |
+        Write-Host "Setting up user account..." -ForegroundColor Green
+        $Password = ConvertTo-SecureString "P@ssw0rd!" -AsPlainText -Force
+        Set-LocalUser -Name "runneradmin" -Password $Password
+        Add-LocalGroupMember -Group "Remote Desktop Users" -Member "runneradmin"
+        Write-Host "Username: runneradmin" -ForegroundColor Yellow
+        Write-Host "Password: P@ssw0rd!" -ForegroundColor Yellow
+        
+    - name: Download and Setup ngrok
+      run: |
+        Write-Host "Downloading ngrok..." -ForegroundColor Green
+        Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile "ngrok.zip"
+        Expand-Archive ngrok.zip -DestinationPath C:\ngrok
+        
+    - name: Configure ngrok
+      run: |
+        Write-Host "Configuring ngrok..." -ForegroundColor Green
+        C:\ngrok\ngrok.exe config add-authtoken ${{ secrets.NGROK_SHAHZAIB }}
+        
+    - name: Install Essential Software
+      run: |
+        Write-Host "Installing essential software..." -ForegroundColor Green
+        
+        # Install Chocolatey
+        Set-ExecutionPolicy Bypass -Scope Process -Force
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+        iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+        
+        # Install Chrome
+        choco install googlechrome -y
+        
+        # Install 7-Zip
+        choco install 7zip -y
+        
+        # Install Notepad++
+        choco install notepadplusplus -y
+        
+        Write-Host "Software installation completed!" -ForegroundColor Green
+        
+    - name: Configure Chrome Extensions
+      run: |
+        Write-Host "Configuring Chrome with security extensions..." -ForegroundColor Green
+        
+        # Create Chrome preferences for extensions
+        $ChromePrefs = @"
+{
+  "extensions": {
+    "settings": {
+      "cjpalhdlnbpafiamejdnhcphjbkeiagm": {
+        "state": 1,
+        "was_installed_by_default": false,
+        "was_installed_by_oem": false,
+        "was_installed_by_custodian": false,
+        "creation_flags": 1,
+        "location": 1,
+        "manifest": {
+          "name": "uBlock Origin",
+          "version": "1.0"
+        }
+      }
+    }
+  }
+}
+"@
+        
+        $ChromeDir = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default"
+        if (!(Test-Path $ChromeDir)) {
+          New-Item -ItemType Directory -Path $ChromeDir -Force
+        }
+        
+        $ChromePrefs | Out-File -FilePath "$ChromeDir\Preferences" -Encoding UTF8
+        
+    - name: Setup Cloudflare WARP
+      run: |
+        Write-Host "Setting up Cloudflare WARP..." -ForegroundColor Green
+        try {
+          Invoke-WebRequest -Uri "https://1111-releases.cloudflareclient.com/windows/Cloudflare_WARP_Release-x64.msi" -OutFile "CloudflareWARP.msi"
+          Start-Process msiexec.exe -Wait -ArgumentList '/I CloudflareWARP.msi /quiet'
+          Write-Host "Cloudflare WARP installed successfully!" -ForegroundColor Green
+        } catch {
+          Write-Host "Cloudflare WARP installation failed, continuing..." -ForegroundColor Yellow
+        }
+        
+    - name: Start ngrok Tunnel
+      run: |
+        Write-Host "Starting ngrok tunnel..." -ForegroundColor Green
+        Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "tcp 3389" -WindowStyle Hidden
+        Start-Sleep -Seconds 10
+        
+    - name: Get Connection Details
+      run: |
+        Write-Host "`n=== CONNECTION DETAILS ===" -ForegroundColor Green
+        try {
+          $ngrokApi = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels"
+          $publicUrl = $ngrokApi.tunnels[0].public_url
+          $host = $publicUrl -replace "tcp://", ""
+          
+          Write-Host "╔══════════════════════════════════════╗" -ForegroundColor Cyan
+          Write-Host "║         ENIGMANO RDP ACCESS          ║" -ForegroundColor Cyan  
+          Write-Host "╠══════════════════════════════════════╣" -ForegroundColor Cyan
+          Write-Host "║ Host: $host" -ForegroundColor White
+          Write-Host "║ Username: runneradmin                ║" -ForegroundColor White
+          Write-Host "║ Password: P@ssw0rd!                  ║" -ForegroundColor White
+          Write-Host "╚══════════════════════════════════════╝" -ForegroundColor Cyan
+          
+          Write-Host "`nConnection Instructions:" -ForegroundColor Yellow
+          Write-Host "1. Open Remote Desktop Connection" -ForegroundColor White
+          Write-Host "2. Enter the host address above" -ForegroundColor White
+          Write-Host "3. Use the provided credentials" -ForegroundColor White
+          Write-Host "4. IMPORTANT: Minimize (don't close) this window to keep connection alive!" -ForegroundColor Red
+          
+        } catch {
+          Write-Host "Error getting ngrok details. Checking manually..." -ForegroundColor Red
+          Start-Sleep -Seconds 5
+          try {
+            $ngrokApi = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels"
+            $publicUrl = $ngrokApi.tunnels[0].public_url
+            Write-Host "Manual check - ngrok URL: $publicUrl" -ForegroundColor Green
+          } catch {
+            Write-Host "ngrok API not accessible. Please check ngrok status manually." -ForegroundColor Red
+          }
+        }
+        
+    - name: Keep Session Alive
+      run: |
+        Write-Host "`n=== SESSION ACTIVE ===" -ForegroundColor Green
+        Write-Host "EnigMano RDP instance is now running!" -ForegroundColor Cyan
+        Write-Host "Instance will remain active for up to 6 hours." -ForegroundColor Yellow
+        Write-Host "Do not close this window to maintain the connection." -ForegroundColor Red
+        
+        # Keep the session alive
+        $counter = 0
+        while ($true) {
+          $counter++
+          Write-Host "Session active - Heartbeat #$counter ($(Get-Date))" -ForegroundColor Green
+          
+          # Check if ngrok is still running
+          try {
+            $ngrokStatus = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -TimeoutSec 5
+            if ($ngrokStatus.tunnels.Count -gt 0) {
+              Write-Host "ngrok tunnel status: ACTIVE" -ForegroundColor Green
+            } else {
+              Write-Host "ngrok tunnel status: NO TUNNELS" -ForegroundColor Yellow
+            }
+          } catch {
+            Write-Host "ngrok tunnel status: ERROR - Restarting..." -ForegroundColor Red
+            Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "tcp 3389" -WindowStyle Hidden
+          }
+          
+          Start-Sleep -Seconds 60
+        }
